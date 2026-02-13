@@ -1,0 +1,136 @@
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+import json
+import asyncio
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+# Import the chain creation function and retrieval function from the chatbot module
+from src.chatbot import create_chatbot_chain, retrieve_interaction_info
+
+# Initialize the FastAPI app
+app = FastAPI()
+
+# Load the model and create the chain ONCE when the server starts
+logger.info("Starting server and loading models...")
+try:
+    # Now returns both the chain and the database (DataFrame)
+    chatbot_chain, db = create_chatbot_chain()
+    logger.info("Model and database loaded successfully.")
+except Exception as e:
+    logger.critical(f"Failed to load model or database: {e}")
+    raise e
+
+
+# Define the request model: what the app will send to the server
+class Question(BaseModel):
+    text: str
+    mode: str = "conversation"  # Options: "conversation", "data"
+    audience: str = "patient"  # Options: "patient", "pharmacist"
+    language: str = "English"  # e.g., "English", "Indonesian", "Spanish"
+    verbosity: str = "detailed"  # Options: "concise", "detailed"
+    format: str = "text"  # Options: "text", "json"
+
+
+@app.get("/")
+async def read_root():
+    logger.info("Health check endpoint called.")
+    return {"message": "Drug Interaction Chatbot API is running"}
+
+
+# This is your main API endpoint
+@app.post("/ask")
+async def ask_question(question: Question):
+    """
+    Receives a question and a mode.
+    - mode="conversation": Returns LLM-generated response (default).
+    - mode="data": Returns raw retrieved interaction info from the seed CSV.
+    """
+    logger.info(
+        f"Received /ask request: {question.text[:50]}... | Mode: {question.mode}"
+    )
+
+    if question.mode == "data":
+        # Direct retrieval without LLM
+        answer = retrieve_interaction_info(question.text, db)
+        logger.info("Returning data mode response.")
+        return {"answer": answer}
+
+    # Default: Conversation mode (LLM)
+    # Use ainvoke for asynchronous execution if supported by the chain components
+    # Otherwise, FastAPI handles sync defs in a threadpool, but async def + sync call blocks the loop.
+    # Since we are using llama.cpp which might be CPU bound, ainvoke is preferred if implemented,
+    # or we keep it sync def to let FastAPI thread it.
+    # However, LangChain's ainvoke usually handles threading for sync runnables.
+    try:
+        answer = await chatbot_chain.ainvoke(
+            {
+                "question": question.text,
+                "audience": question.audience,
+                "language": question.language,
+                "verbosity": question.verbosity,
+                "format": question.format,
+            }
+        )
+        logger.info("Generated LLM response successfully.")
+        return {"answer": answer}
+    except Exception as e:
+        logger.error(f"Error generating response: {e}")
+        return {
+            "answer": "I'm sorry, I encountered an error while processing your request."
+        }
+
+
+@app.post("/stream")
+async def stream_question(question: Question):
+    """
+    Streams the answer token-by-token using Server-Sent Events (SSE).
+    Useful for real-time UI updates.
+    """
+    logger.info(f"Received /stream request: {question.text[:50]}...")
+
+    if question.mode == "data":
+        # Data mode is fast enough, no need to stream, but we wrap it in a generator for consistency
+        async def data_generator():
+            answer = retrieve_interaction_info(question.text, db)
+            yield answer
+
+        return StreamingResponse(data_generator(), media_type="text/plain")
+
+    # Conversation mode: Stream from LLM
+    async def response_generator():
+        try:
+            # astream returns an async iterator of chunks
+            async for chunk in chatbot_chain.astream(
+                {
+                    "question": question.text,
+                    "audience": question.audience,
+                    "language": question.language,
+                    "verbosity": question.verbosity,
+                    "format": question.format,
+                }
+            ):
+                # Check if chunk is a string or has content
+                if isinstance(chunk, str):
+                    yield chunk
+                elif hasattr(chunk, "content"):
+                    yield chunk.content
+                else:
+                    yield str(chunk)
+
+                # Optional: small delay to ensure smooth streaming if local inference is too bursty
+                # await asyncio.sleep(0.01)
+            logger.info("Streaming completed successfully.")
+        except Exception as e:
+            logger.error(f"Error during streaming: {e}")
+            yield f"\n[Error: {str(e)}]"
+
+    return StreamingResponse(response_generator(), media_type="text/event-stream")
