@@ -1,7 +1,0 @@
-langchain-community
-langchain-core
-python-dotenv
-llama-cpp-python>=0.2.0
-pandas
-fastapi
-uvicorn
