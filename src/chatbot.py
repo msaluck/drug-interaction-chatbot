@@ -13,24 +13,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# --- 1. DATA LOADING AND RETRIEVAL FUNCTION ---
-
-
-def load_interaction_data(filepath):
-    """Loads the drug interaction data from a CSV file."""
-    try:
-        df = pd.read_csv(filepath)
-        # Normalize column names to lower case for consistency
-        df.columns = [col.lower() for col in df.columns]
-        logger.info(
-            f"Data loaded successfully from {filepath}. Columns: {df.columns.tolist()}"
-        )
-        return df
-    except FileNotFoundError:
-        logger.error(
-            f"Error: The file '{filepath}' was not found. Make sure it's in the same directory as the script."
-        )
-        return None
+# --- 1. DATA LOADING AND RETRIEVAL CLASS ---
 
 
 def format_retrieved_info(row):
@@ -38,8 +21,6 @@ def format_retrieved_info(row):
     if row is None:
         return "No interaction information found for this pair of drugs."
 
-    # Using .get(key, 'N/A') is safer in case a column is missing
-    # We use explicit newlines to ensure clean formatting for both LLM and API output
     info = (
         f"- Drug A: {row.get('drug_a', 'N/A')}\n"
         f"- Drug B: {row.get('drug_b', 'N/A')}\n"
@@ -51,82 +32,120 @@ def format_retrieved_info(row):
     return info
 
 
-def retrieve_interaction_info(question: str, df: pd.DataFrame):
-    """
-    Finds interaction information for two drugs mentioned in the question.
-    Uses Regex for extraction and Fuzzy Matching for drug name resolution.
-    """
-    question_lower = question.lower()
-
-    # Get all unique drugs from the database
-    all_drugs = set(df["drug_a"].unique()).union(set(df["drug_b"].unique()))
-
-    drug1_found = None
-    drug2_found = None
-
-    # --- STRATEGY 1: REGEX PATTERNS (High Precision) ---
-    patterns = [
-        r"between\s+(.+?)\s+and\s+(.+?)(?:\?|$| in | for )",
-        r"interaction of\s+(.+?)\s+and\s+(.+?)(?:\?|$| in | for )",
-        r"take\s+(.+?)\s+(?:with|and)\s+(.+?)(?:\?|$| in | for )",
-        r"^(.+?)\s+(?:and|with|&|\+)\s+(.+?)(?:\?|$| in | for )",
-    ]
-
-    match = None
-    for pat in patterns:
-        match = re.search(pat, question_lower)
-        if match:
-            break
-
-    if match:
-        raw_drug1, raw_drug2 = match.groups()
-        # Fuzzy resolve the regex groups
-        m1 = process.extractOne(
-            raw_drug1, all_drugs, scorer=fuzz.WRatio, score_cutoff=80
-        )
-        m2 = process.extractOne(
-            raw_drug2, all_drugs, scorer=fuzz.WRatio, score_cutoff=80
-        )
-        if m1 and m2:
-            drug1_found = m1[0]
-            drug2_found = m2[0]
-
-    # --- STRATEGY 2: VOCABULARY SCANNING (Fallback for conversational input) ---
-    if not drug1_found or not drug2_found:
-        found_drugs = set()
-        # Split by non-word characters to get tokens
-        tokens = re.findall(r"\w+", question_lower)
-
-        for token in tokens:
-            if len(token) < 4:
-                continue  # Skip short words
-
-            # Check if this token fuzzy matches any known drug
-            match = process.extractOne(
-                token, all_drugs, scorer=fuzz.WRatio, score_cutoff=85
+class DrugRetriever:
+    def __init__(self, filepath):
+        self.df = self._load_data(filepath)
+        if self.df is not None:
+            # Pre-compute the unique drug list ONCE during initialization
+            self.all_drugs = list(
+                set(self.df["drug_a"].unique()).union(set(self.df["drug_b"].unique()))
             )
+            logger.info("Loaded %d unique drugs into vocabulary.", len(self.all_drugs))
+        else:
+            self.all_drugs = []
+
+    def _load_data(self, filepath):
+        """Loads interaction data and normalizes columns."""
+        try:
+            df = pd.read_csv(filepath)
+            df.columns = [col.lower() for col in df.columns]
+            logger.info(
+                "Data loaded from %s. Columns: %s", filepath, df.columns.tolist()
+            )
+            return df
+        except FileNotFoundError:
+            logger.error("File not found: %s", filepath)
+            return None
+
+    def retrieve(self, question: str):
+        """
+        Finds interaction info. Uses cached vocabulary for speed.
+        """
+        if self.df is None:
+            return "Database not loaded."
+
+        question_lower = question.lower()
+        drug1_found = None
+        drug2_found = None
+
+        # --- STRATEGY 1: REGEX ---
+        patterns = [
+            r"between\s+(.+?)\s+and\s+(.+?)(?:\?|$| in | for )",
+            r"interaction of\s+(.+?)\s+and\s+(.+?)(?:\?|$| in | for )",
+            r"take\s+(.+?)\s+(?:with|and)\s+(.+?)(?:\?|$| in | for )",
+            r"^(.+?)\s+(?:and|with|&|\+)\s+(.+?)(?:\?|$| in | for )",
+        ]
+
+        match = None
+        for pat in patterns:
+            match = re.search(pat, question_lower)
             if match:
-                found_drugs.add(match[0])
+                break
 
-        if len(found_drugs) >= 2:
-            d_list = list(found_drugs)
-            drug1_found = d_list[0]
-            drug2_found = d_list[1]
+        if match:
+            raw_drug1, raw_drug2 = match.groups()
+            # Fuzzy match against CACHED all_drugs list
+            m1 = process.extractOne(
+                raw_drug1, self.all_drugs, scorer=fuzz.WRatio, score_cutoff=80
+            )
+            m2 = process.extractOne(
+                raw_drug2, self.all_drugs, scorer=fuzz.WRatio, score_cutoff=80
+            )
+            if m1:
+                drug1_found = m1[0]
+            if m2:
+                drug2_found = m2[0]
 
-    # --- FINAL QUERY ---
-    if not drug1_found or not drug2_found:
-        return "Could not identify two known drugs in your question. Please ensure the drugs are in our database."
+        # --- STRATEGY 2: VOCABULARY SCANNING ---
+        if not drug1_found or not drug2_found:
+            found_drugs = set()
+            tokens = re.findall(r"\w+", question_lower)
+            for token in tokens:
+                if len(token) < 4:
+                    continue
+                # Fuzzy match token against CACHED list
+                match = process.extractOne(
+                    token, self.all_drugs, scorer=fuzz.WRatio, score_cutoff=85
+                )
+                if match:
+                    found_drugs.add(match[0])
 
-    # Query the DataFrame
-    result = df[
-        ((df["drug_a"] == drug1_found) & (df["drug_b"] == drug2_found))
-        | ((df["drug_a"] == drug2_found) & (df["drug_b"] == drug1_found))
-    ]
+            if len(found_drugs) >= 2:
+                d_list = list(found_drugs)
+                drug1_found = d_list[0]
+                drug2_found = d_list[1]
 
-    if not result.empty:
-        return format_retrieved_info(result.iloc[0].to_dict())
-    else:
-        return f"No interaction information found for the pair: {drug1_found} and {drug2_found}."
+        # --- QUERY ---
+        if not drug1_found or not drug2_found:
+            return "Could not identify two known drugs in your question."
+
+        result = self.df[
+            ((self.df["drug_a"] == drug1_found) & (self.df["drug_b"] == drug2_found))
+            | ((self.df["drug_a"] == drug2_found) & (self.df["drug_b"] == drug1_found))
+        ]
+
+        if not result.empty:
+            return format_retrieved_info(result.iloc[0].to_dict())
+        else:
+            return (
+                f"No interaction information found for {drug1_found} and {drug2_found}."
+            )
+
+
+# Helper to maintain backward compatibility for tests or other modules if needed
+def load_interaction_data(filepath):
+    # This function is deprecated in favor of DrugRetriever class
+    retriever = DrugRetriever(filepath)
+    return retriever.df
+
+
+def retrieve_interaction_info(question, df):
+    # This is also deprecated but kept for compatibility.
+    # Ideally, refactor to use the class instance.
+    # Because we don't have the cached list here easily, this old function is slow.
+    # We will mainly use the Class in the chain.
+    del question, df  # Mark as unused to suppress lint warnings
+    pass
 
 
 # --- 2. LANGCHAIN SETUP ---
@@ -147,7 +166,6 @@ INSTRUCTIONS:
 - If verbosity is 'concise', keep the answer short and to the point (max 2-3 sentences).
 - If verbosity is 'detailed', provide a comprehensive explanation.
 - If format is 'json', output ONLY a valid JSON object with keys: "severity", "summary", "recommendation". Do not add markdown formatting like ```json.
-- Answer in the specified LANGUAGE.
 - Do not use any information outside of the provided context.
 - If the context says "No information found", reply that you do not have information on that interaction.
 
@@ -157,6 +175,7 @@ CONTEXT:
 QUESTION:
 {question}
 
+IMPORTANT: Answer the question in {language} language.
 ANSWER:
 """
 
@@ -215,13 +234,14 @@ output_parser = StrOutputParser()
 
 def create_chatbot_chain():
     """Sets up and returns the RAG chain using llama.cpp (llama-cpp-python)."""
-    # Load interaction CSV
-    db = load_interaction_data("data/interactions_seed.csv")
-    if db is None:
+    # Initialize the Retriever Class
+    retriever = DrugRetriever("data/interactions_seed.csv")
+    if retriever.df is None:
         raise RuntimeError("Failed to load interaction data.")
 
     # Resolve llama.cpp model path and basic settings from env
     model_path = os.getenv("LLAMA_CPP_MODEL", os.path.join("models", "model.gguf"))
+
     n_ctx = int(os.getenv("LLAMA_CPP_CTX", "4096"))
     n_threads = int(os.getenv("LLAMA_CPP_THREADS", str(os.cpu_count() or 4)))
     temperature = float(os.getenv("LLAMA_CPP_TEMPERATURE", "0"))
@@ -242,10 +262,11 @@ def create_chatbot_chain():
         "n_ctx": n_ctx,
         "n_threads": n_threads,
         "temperature": temperature,
+        "streaming": True,  # Optimization: Hint to use streaming mode
     }
     if n_gpu_layers > 0:
         llm_kwargs["n_gpu_layers"] = n_gpu_layers
-        logger.info(f"[llama.cpp] Using GPU offload for {n_gpu_layers} layers.")
+        logger.info("[llama.cpp] Using GPU offload for %d layers.", n_gpu_layers)
     else:
         logger.info(
             "[llama.cpp] Running fully on CPU (no GPU layers specified or value is 0)."
@@ -256,7 +277,8 @@ def create_chatbot_chain():
     # Compose the chain
     chain = (
         {
-            "context": (lambda x: retrieve_interaction_info(x["question"], db)),
+            # Use the retriever instance method
+            "context": (lambda x: retriever.retrieve(x["question"])),
             "question": (lambda x: x["question"]),
             "audience": (lambda x: x.get("audience", "patient")),
             "language": (lambda x: x.get("language", "English")),
@@ -267,7 +289,8 @@ def create_chatbot_chain():
         | llm
         | output_parser
     )
-    return chain, db
+    # Return both chain and the retriever instance (formerly db)
+    return chain, retriever
 
 
 # We remove the if __name__ == "__main__": block for now

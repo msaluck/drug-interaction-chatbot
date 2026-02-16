@@ -1,8 +1,6 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import json
-import asyncio
 import logging
 
 # Configure logging
@@ -13,8 +11,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Import the chain creation function and retrieval function from the chatbot module
-from src.chatbot import create_chatbot_chain, retrieve_interaction_info
+# Import the chain creation function
+from src.chatbot import create_chatbot_chain
 
 # Initialize the FastAPI app
 app = FastAPI()
@@ -22,11 +20,11 @@ app = FastAPI()
 # Load the model and create the chain ONCE when the server starts
 logger.info("Starting server and loading models...")
 try:
-    # Now returns both the chain and the database (DataFrame)
-    chatbot_chain, db = create_chatbot_chain()
+    # Now returns both the chain and the retriever instance
+    chatbot_chain, retriever = create_chatbot_chain()
     logger.info("Model and database loaded successfully.")
 except Exception as e:
-    logger.critical(f"Failed to load model or database: {e}")
+    logger.critical("Failed to load model or database: %s", e)
     raise e
 
 
@@ -55,12 +53,13 @@ async def ask_question(question: Question):
     - mode="data": Returns raw retrieved interaction info from the seed CSV.
     """
     logger.info(
-        f"Received /ask request: {question.text[:50]}... | Mode: {question.mode}"
+        "Received /ask request: %s... | Mode: %s", question.text[:50], question.mode
     )
 
     if question.mode == "data":
         # Direct retrieval without LLM
-        answer = retrieve_interaction_info(question.text, db)
+        # Use the retriever instance method
+        answer = retriever.retrieve(question.text)
         logger.info("Returning data mode response.")
         return {"answer": answer}
 
@@ -83,7 +82,7 @@ async def ask_question(question: Question):
         logger.info("Generated LLM response successfully.")
         return {"answer": answer}
     except Exception as e:
-        logger.error(f"Error generating response: {e}")
+        logger.error("Error generating response: %s", e)
         return {
             "answer": "I'm sorry, I encountered an error while processing your request."
         }
@@ -95,12 +94,13 @@ async def stream_question(question: Question):
     Streams the answer token-by-token using Server-Sent Events (SSE).
     Useful for real-time UI updates.
     """
-    logger.info(f"Received /stream request: {question.text[:50]}...")
+    logger.info("Received /stream request: %s...", question.text[:50])
 
     if question.mode == "data":
         # Data mode is fast enough, no need to stream, but we wrap it in a generator for consistency
         async def data_generator():
-            answer = retrieve_interaction_info(question.text, db)
+            # Use the retriever instance method
+            answer = retriever.retrieve(question.text)
             yield answer
 
         return StreamingResponse(data_generator(), media_type="text/plain")
@@ -130,7 +130,7 @@ async def stream_question(question: Question):
                 # await asyncio.sleep(0.01)
             logger.info("Streaming completed successfully.")
         except Exception as e:
-            logger.error(f"Error during streaming: {e}")
+            logger.error("Error during streaming: %s", e)
             yield f"\n[Error: {str(e)}]"
 
     return StreamingResponse(response_generator(), media_type="text/event-stream")

@@ -43,5 +43,5 @@ if (-not (Test-Path ".env")) {
 }
 
 # 5) Run server
-Write-Host "[run] Starting FastAPI with Uvicorn on http://127.0.0.1:8000" -ForegroundColor Green
-uvicorn src.main:app --reload
+Write-Host "[run] Starting FastAPI with Uvicorn on http://0.0.0.0:8000" -ForegroundColor Green
+uvicorn src.main:app --reload --host 0.0.0.0
