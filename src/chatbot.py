@@ -33,8 +33,20 @@ def format_retrieved_info(row):
 
 
 class DrugRetriever:
-    def __init__(self, filepath):
-        self.df = self._load_data(filepath)
+    def __init__(self, source):
+        """
+        Initialize with a file path (str) or an existing DataFrame.
+        """
+        if isinstance(source, str):
+            self.df = self._load_data(source)
+        elif isinstance(source, pd.DataFrame):
+            self.df = source
+            # Ensure columns are lower case if passing raw DF
+            self.df.columns = [col.lower() for col in self.df.columns]
+        else:
+            logger.error("Invalid source type. Must be filepath (str) or DataFrame.")
+            self.df = None
+
         if self.df is not None:
             # Pre-compute the unique drug list ONCE during initialization
             self.all_drugs = list(
@@ -117,7 +129,9 @@ class DrugRetriever:
 
         # --- QUERY ---
         if not drug1_found or not drug2_found:
-            return {"error": "Could not identify two known drugs in your question."}
+            return {
+                "error": "No interaction information found: Could not identify two known drugs in your question."
+            }
 
         result = self.df[
             ((self.df["drug_a"] == drug1_found) & (self.df["drug_b"] == drug2_found))
@@ -152,12 +166,11 @@ def load_interaction_data(filepath):
 
 
 def retrieve_interaction_info(question, df):
-    # This is also deprecated but kept for compatibility.
-    # Ideally, refactor to use the class instance.
-    # Because we don't have the cached list here easily, this old function is slow.
-    # We will mainly use the Class in the chain.
-    del question, df  # Mark as unused to suppress lint warnings
-    pass
+    """
+    Deprecated function wrapper. Uses DrugRetriever with the provided DataFrame.
+    """
+    retriever = DrugRetriever(df)
+    return retriever.retrieve(question)
 
 
 # --- 2. LANGCHAIN SETUP ---
@@ -255,8 +268,14 @@ def create_chatbot_chain():
     model_path = os.getenv("LLAMA_CPP_MODEL", os.path.join("models", "model.gguf"))
 
     n_ctx = int(os.getenv("LLAMA_CPP_CTX", "4096"))
-    n_threads = int(os.getenv("LLAMA_CPP_THREADS", str(os.cpu_count() or 4)))
+    # Automatically clamp threads to available CPU count to prevent oversubscription
+    max_threads = os.cpu_count() or 4
+    env_threads = int(os.getenv("LLAMA_CPP_THREADS", str(max_threads)))
+    n_threads = min(env_threads, max_threads)
+
+    n_batch = int(os.getenv("LLAMA_CPP_BATCH", "512"))
     temperature = float(os.getenv("LLAMA_CPP_TEMPERATURE", "0"))
+
     # Optional GPU layers (only effective if llama-cpp-python built with cuBLAS)
     gpu_layers_env = os.getenv("LLAMA_CPP_GPU_LAYERS")
     n_gpu_layers = (
@@ -273,6 +292,7 @@ def create_chatbot_chain():
         "model_path": model_path,
         "n_ctx": n_ctx,
         "n_threads": n_threads,
+        "n_batch": n_batch,
         "temperature": temperature,
         "streaming": True,  # Optimization: Hint to use streaming mode
     }
