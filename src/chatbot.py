@@ -57,12 +57,12 @@ class DrugRetriever:
             logger.error("File not found: %s", filepath)
             return None
 
-    def retrieve(self, question: str):
+    def search(self, question: str):
         """
-        Finds interaction info. Uses cached vocabulary for speed.
+        Search for interaction data and return the raw dictionary or None/Error string.
         """
         if self.df is None:
-            return "Database not loaded."
+            return None
 
         question_lower = question.lower()
         drug1_found = None
@@ -117,7 +117,7 @@ class DrugRetriever:
 
         # --- QUERY ---
         if not drug1_found or not drug2_found:
-            return "Could not identify two known drugs in your question."
+            return {"error": "Could not identify two known drugs in your question."}
 
         result = self.df[
             ((self.df["drug_a"] == drug1_found) & (self.df["drug_b"] == drug2_found))
@@ -125,11 +125,23 @@ class DrugRetriever:
         ]
 
         if not result.empty:
-            return format_retrieved_info(result.iloc[0].to_dict())
+            return result.iloc[0].to_dict()
         else:
-            return (
-                f"No interaction information found for {drug1_found} and {drug2_found}."
-            )
+            return {
+                "error": f"No interaction information found for {drug1_found} and {drug2_found}."
+            }
+
+    def retrieve(self, question: str):
+        """
+        Finds interaction info. Uses cached vocabulary for speed.
+        Returns formatted string for LLM context.
+        """
+        data = self.search(question)
+        if data is None:
+            return "Database not loaded."
+        if "error" in data:
+            return data["error"]
+        return format_retrieved_info(data)
 
 
 # Helper to maintain backward compatibility for tests or other modules if needed

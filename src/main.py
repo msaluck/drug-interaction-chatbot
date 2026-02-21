@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import logging
+import json
 
 # Configure logging
 logging.basicConfig(
@@ -108,7 +109,20 @@ async def stream_question(question: Question):
     # Conversation mode: Stream from LLM
     async def response_generator():
         try:
-            # astream returns an async iterator of chunks
+            # 1. First, search for the data and send it as a JSON event
+            interaction_data = retriever.search(question.text)
+
+            # If valid data found (not an error dictionary), send it
+            if interaction_data and "error" not in interaction_data:
+                # We serialize the dictionary to JSON string
+                json_data = json.dumps(interaction_data)
+                # Send as a special event or just a line with a prefix
+                # Using standard SSE format with an 'event' type if client supports it,
+                # but 'uvicorn' StreamingResponse with media_type="text/event-stream" usually just sends data: ...
+                # We will send a special JSON line first.
+                yield f"{json_data}\n\n"
+
+            # 2. Then stream the LLM response chunks
             async for chunk in chatbot_chain.astream(
                 {
                     "question": question.text,
