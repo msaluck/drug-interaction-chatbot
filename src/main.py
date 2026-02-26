@@ -1,8 +1,11 @@
+import logging
+import json
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import logging
-import json
+
+# Import the chain creation function
+from src.chatbot import create_chatbot_chain
 
 # Configure logging
 logging.basicConfig(
@@ -11,9 +14,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
-
-# Import the chain creation function
-from src.chatbot import create_chatbot_chain
 
 # Initialize the FastAPI app
 app = FastAPI()
